@@ -1,0 +1,705 @@
+---
+title: "BANA 7050 Spring 2022 Final Project Report"
+subtitle: "Analysing the Cincinnati Non-Emergency Requests Data using various time-series algorithms like Naive, ARIMA, and FB's Prophet model."
+author: "Mounish Sunkara"
+date: "25 February 2023"
+editor: visual
+format:
+  html:
+    code-fold: true
+    code-summary: "Click here to display the code"
+    code-overflow: scroll
+    code-tools: true
+    code-block-background: true
+    code-block-bg: true
+    code-block-border-left: "#FC865D"
+    theme: journal
+    fontsize: 1.1em
+    linestretch: 1.7
+    light: flatly
+    dark: darkly
+    slide-number: c/t
+    fig-align: "center"
+    fig-width: 8
+    fig-asp: 0.618
+    out-width: 100%
+    fig-format: svg
+    html-math-method: katex
+    css: styles.css
+    toc: true
+    toc-location: left
+    toc-title: Contents
+    toc-depth: 10
+    toc_float: true
+    smooth-scroll: true
+    anchor-sections: true
+    link-external-icon: true
+    link-external-newwindow: true
+    highlight-style: github
+embed-resources: true
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+  cache: refresh
+---
+
+```{r warning=FALSE, message=FALSE}
+# pckgs <- c("readxl","tidyverse", "lubridate", "ggplot2","zoo","tsibble","psych","data.table","forecast", "generics")
+# install.packages(pckgs)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(zoo)
+library(tsibble)
+library(readxl)
+library(psych)
+library(data.table)
+library(forecast)
+library(generics)
+library(fpp3)
+library(urca)
+library(fable)
+library(tseries)
+```
+
+# Section 1 - Exploratory Data Analysis and Time Series Decomposition
+
+## [**Introduction:**]{.underline}
+
+Cincinnati 311 Non-Emergency Service Requests data set is procured from the City of Cincinnati open data website <https://data.cincinnati-oh.gov/Thriving-Neighborhoods/Cincinnati-311-Non-Emergency-Service-Requests/4cjh-bm8b>. The data set contains the records of all non-emergency service requests made to the City of Cincinnati, including the date and time of the request, the type of request, the status of the request, and the location of the request. The data has 1105413 rows and is updated from 2012 till January 2023.
+
+## [**Splitting the data set into train and test:**]{.underline}
+
+The train data set has nearly to 70% data while the test data set has the remaining 30% data set. For our data set, this means the training is done on the data before 2020.
+
+```{r}
+cner <- read.csv("Cincinnati_311__Non-Emergency__Service_Requests.csv")
+cner %>%
+  select( SERVICE_REQUEST_ID,ZIPCODE, REQUESTED_DATE) %>%
+  mutate(req_date = yearmonth(as.yearmon(mdy_hms(REQUESTED_DATE),"%m%Y"))) %>%
+  group_by(req_date) %>%
+  summarize(num_requests = n()) %>%
+  arrange(req_date) %>%
+  as_tsibble(index = req_date) ->output
+
+output <- output[-133,]
+
+output %>%
+  rename(
+    date = req_date,
+    value = num_requests
+  ) -> output_df
+
+output_df %>%
+  ggplot() +
+  geom_line(aes(date, value)) +
+  geom_vline(xintercept = as.numeric(as.Date('2020-01-01')), color = 'red') +
+  theme_bw()+
+  annotate("text", x=17740, y=4000, label= "Training-Period",
+         col="blue", size=4, parse=TRUE)+
+  annotate("text", x=18740, y=4000, label= "Testing-Period",
+         col="blue", size=4, parse=TRUE)+
+  labs(
+    title = "Cincinnati Non-Emergency Requests",
+    subtitle = "Complete data with a speration between train and test split",
+    caption = "Source: City of Cincinnati Open Data")+
+  theme(plot.title = element_text(color = "black",
+                                  size = 13, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 10, hjust = 0.5),
+    plot.caption = element_text(face = "italic", hjust = 0))+
+    scale_color_manual(name='Regression Model',
+                     breaks=c('Linear', 'Quadratic'),
+                     values=c('Quadratic'='blue', 'Linear'='purple'))
+
+
+
+train <- output_df %>%
+  filter(year(date) < '2020')
+
+test <- output_df %>%
+  filter(year(date) >= '2020')
+```
+
+## [Understanding the "data-generating process":]{.underline}
+
+### [**1. Density Plot:**]{.underline}
+
+```{r warning=FALSE, message=FALSE}
+dens_plot <- train %>%
+  ggplot(aes(value)) +
+  geom_histogram(aes(y=..density..), colour="black", fill="white")+
+  geom_density(alpha=0.3, fill="blue") +
+  theme_bw() +
+  labs(subtitle = "Density plot for Non-Emergency Requests",
+     y = "Density",
+     x = "Number of Requests")
+
+dens_plot
+```
+
+From the density plot, it is noticed that there is higher frequency for higher number of requests (10000). This suggests that number of requests lodged with departments are usually higher.
+
+### [2. Line Plot:]{.underline}
+
+```{r}
+
+#Line Chart
+line_plot <- train %>% 
+  ggplot(aes(date, value)) +
+  geom_line(color = 'blue')+
+  theme_bw() +
+  labs(subtitle = "Line plot for Non-Emergency Requests",
+     y = "Number of Requests",
+     x = "Year-Month")
+
+line_plot
+```
+
+The line graph points out that the Cincinnati Non-Emergency requests data set is daily updated. And when aggregated by month over the years it shows that requests dip during winter and increase again during summer. This shows that a seasonality exists in the data.
+
+### [3. Boxplot:]{.underline}
+
+```{r}
+
+train %>%
+  ggplot() +
+  geom_boxplot(aes("", value),fill="blue", alpha = 0.3) +
+  theme_bw() +
+  labs(subtitle = "Boxplot for Non-Emergency Requests",
+     y = "Number of Requests",
+     x = "x") -> box_plot
+
+box_plot
+```
+
+From the boxplot, it is evident that the time series data doesn't have any significant outliers.
+
+### [Summary Statistics:]{.underline}
+
+```{r}
+data.frame(describe(train$value))
+```
+
+From the above analysis, we can confidently say that the data:
+
+-   Has no outliers present
+-   Has seasonality - the number of requests dip in winter and increase in summer.
+
+## [**Moving Average of the time series:**]{.underline}
+
+```{r warning=FALSE, message=FALSE}
+train %>%
+  mutate(
+    num_requests_ma_3 = rollapply(value, 3, FUN = mean, align = "center", fill = NA),
+    num_requests_ma_5 = rollapply(value, 5, FUN = mean, align = "center", fill = NA),
+    num_requests_ma_7 = rollapply(value, 7, FUN = mean, align = "center", fill = NA),
+    num_requests_ma_13 = rollapply(value, 13, FUN = mean, align = "center", fill = NA),
+    num_requests_ma_25 = rollapply(value, 25, FUN = mean, align = "center", fill = NA)
+  ) ->output_ma
+
+ouput_pivot <-
+output_ma %>%
+  pivot_longer(cols = c(num_requests_ma_3, num_requests_ma_5, 
+                        num_requests_ma_7,num_requests_ma_13,num_requests_ma_25), names_to = "MA_order", 
+               values_to = "Requests_MA") %>%
+  mutate(MA_order = factor(MA_order, 
+                           levels = c("num_requests_ma_3","num_requests_ma_5",
+                                      "num_requests_ma_7","num_requests_ma_13","num_requests_ma_25"),
+                           labels = c("num_requests_ma_3","num_requests_ma_5",
+                                      "num_requests_ma_7","num_requests_ma_13","num_requests_ma_25")))
+
+ouput_pivot %>%
+  mutate(MA_order = case_when(
+    MA_order=='num_requests_ma_3'~'3rd Order',
+    MA_order=='num_requests_ma_5'~'5th Order',
+    MA_order=='num_requests_ma_7'~'7th Order',
+    MA_order=='num_requests_ma_13'~'13th Order',
+    MA_order=='num_requests_ma_25'~'25th Order')) %>%
+  ggplot() +
+  geom_line(aes(date, value ), size = 1) +
+  geom_line(aes(date, Requests_MA, color = MA_order), size = 1) +
+  scale_color_discrete(name = 'MA Order')+
+  theme_bw()+
+  ylab('Number of Non-Emergency Requests')+
+  xlab('Date')
+```
+
+After testing different moving averages, it is confirmed that the moving average 25th order represents the time series data trend well.
+
+## [**Seasonality:**]{.underline}
+
+Now, the residual component after removing trend is used to understand the existence of seasonality.
+
+### [1. Lag plot for residual:]{.underline}
+
+```{r warning=FALSE, message=FALSE}
+train %>%
+  mutate(
+    value_mean = rollmean(
+      value, 
+      k = 25, 
+      fill = NA))%>%
+  mutate(resid = value - value_mean) %>%
+  gg_lag(resid, geom = "point", lags = 1:12)+
+  geom_smooth(aes(color=NULL),method='lm',color='red',se=F)+
+  ggtitle("Lag plot for residual") +
+  xlab("Lag(Number of residual requests,n)")+
+  ylab("Number of residual requests")
+```
+
+The lag plot for residual after removing trend and the classical decomposition graphs below shows that the time series data has the seasonality. At lag 6, there is a strong negative relationship suggesting the differences between summer and winter. Similarly, the positive relationship at lag 12 indicates that values from the same month in prior years are correlated, indicating seasonality.
+
+### [2. Decomposition plot:]{.underline}
+
+```{r warning=FALSE, message=FALSE}
+train %>%
+  model(
+    classical_decomposition(value,"additive")
+  ) %>%
+  components() %>%
+  autoplot() +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(face = "bold"),
+    axis.text.y = element_text(face = "bold"),
+    plot.background = element_rect(fill = "white") )+
+  labs(title = "Classical Decomposition",
+       subtitle = "Requests (Value) = trend + seasonal + random",
+       y = "Count of Requests",
+       x = "Year-Month")
+```
+
+The above classical decomposition plot shows the trend, seasonality and the white noise. this signifies the presence of seasonality in the time series data.
+
+Thus from our exploratory data analysis and the time series decomposition-we understood the data generating process of the time series data. we also concluded that the moving average 25th order trend and seasonality is present in the data. Now let us proceed to build the ARIMA model.
+
+# Section 2 - ARIMA Modeling
+
+To fit the ARIMA model, we need to make the data stationary.
+
+## [1. variance stationarity:]{.underline}
+
+From the Original line graph, it is known that time series data is variance stationary.
+
+```{r warning=FALSE, message=FALSE}
+output_roll <- train %>%
+  mutate(
+    requests_mean = rollmean(
+      value, 
+      k = 60, 
+      fill = NA),
+    requests_sd = rollapply(
+      value, 
+      FUN = sd, 
+      width = 12, 
+      fill = NA)
+  )
+
+output_rollsd <- output_roll %>%
+  ggplot() +
+  geom_line(aes(date, requests_sd)) +
+  geom_smooth(aes(date,requests_sd),method='lm',se=F)+ 
+  theme_bw() + 
+  labs(title = "Cincinnati Non-Emergency requests",
+       subtitle = "Variance over Time (12 month rolling window)",
+       y = "Count of Requests",
+       x = "Year-Month")
+
+
+output_rollsd
+```
+
+## [2. Mean stationarity:]{.underline}
+
+```{r warning=FALSE, message=FALSE}
+output_rollmean <- output_roll %>%
+  ggplot() +
+  geom_line(aes(date, requests_mean), color = "blue") +
+  geom_line(aes(date,value))+ 
+  theme_bw() + 
+  labs(title = "Cincinnati Non-Emergency requests",
+       subtitle = "Mean over Time (60 month rolling window)",
+       y = "Count of Requests",
+       x = "Year-Month")
+
+
+output_rollmean
+```
+
+From the above graph, it is shown that mean is stationary.
+
+```{r}
+
+train %>%
+   mutate(value_diff = value - lag(value,12))%>%
+  drop_na()%>%
+  as_tsibble(index=date)-> x
+
+train %>% 
+  mutate(value_diff = value - lag(value,12))%>%
+  mutate(value_log = log1p(value))%>%
+  mutate(value_log_diff = value_log - lag(value_log,12))%>%
+  mutate(value_boxcox = forecast::BoxCox(value, lambda = "auto"))%>%
+  mutate(value_boxcox_diff = value_boxcox - lag(value_boxcox,12))%>%
+  drop_na()%>%
+  as_tsibble(index=date) -> train_transformed
+
+# kpss_value = train_transformed %>% 
+# features(value_diff, unitroot_kpss)
+# 
+# kpss_value
+
+adf.test(train$value)
+
+
+```
+
+The ADF test p-value \<0.05. Hence the data has mean and variance stationarity.
+
+## [3. To remove seasonality:]{.underline}
+
+Seasonal differencing is done on the original dataframe.
+
+Since the data has seasonality, it makes the data non-stationary. the seasonal differencing should be done to remove seasonal effect and make the data stationary.
+
+The line plot after seasonal difference is plotted below.
+
+```{r warning=FALSE, message=FALSE}
+train %>%
+  mutate(value_log = log1p(value)) %>%
+  mutate(value_diff = value - lag(value,12)) %>%
+  as_tsibble(index=date) %>%
+  ggplot() +
+  geom_line(aes(date, value_diff)) +
+  theme_bw() +
+  ggtitle("Cincinnati Non-Emergency requests (After Seasonal differencing)") +
+  ylab("Number of Non-Emergency requests") +
+  xlab("Year-Month")
+```
+
+As the time series data is stationary now. The ARIMA modeling can be performed.
+
+## [**ACF/PACF Plots for deducing the model:**]{.underline}
+
+```{r}
+par(mfrow = c(1,2))
+
+ACF2<- acf(train_transformed$value_diff, lag.max = 24, plot=FALSE)
+plot(ACF2, main = "Seasonally differenced ACF")
+
+PACF2<- pacf(train_transformed$value_diff, lag.max = 24, plot=FALSE)
+plot(PACF2, main = "Seasonally differenced PACF")
+
+
+```
+
+From the PACF plot above, it is known that the time series follow the AR 1 model. Various other models are tried using fable ARIMA and manual methods on the data. The BIC values for them is given in the below table.
+
+## [Best ARIMA model evaluation:]{.underline}
+
+```{r}
+models_bic = train %>%
+  model(
+    mod1 = ARIMA(value~pdq(0,1,0)+PDQ(0,1,0)),
+    mod2 = ARIMA(value~pdq(0,1,1)+PDQ(0,1,0)),
+    mod3 = ARIMA(value~pdq(1,1,0)+PDQ(0,1,0)),
+    mod4 = ARIMA(value~pdq(2,1,0)+PDQ(0,1,0)),
+    mod5 = ARIMA(value~pdq(2,1,1)+PDQ(0,1,0)),
+    mod6 = ARIMA(value~pdq(0,1,2)+PDQ(0,1,0)),
+    mod7 = ARIMA(value~pdq(1,0,1)+PDQ(0,1,0)),
+    mod8 = ARIMA(value~pdq(1,1,1)+PDQ(0,1,0)),
+    fable_ARIMA = fable::ARIMA(value,approximation=F,stepwise = F)
+    # auto_arima = auto.arima(value)
+  )
+
+models_bic %>%
+  glance() %>%
+  arrange(BIC)
+
+```
+
+Auto arima method is also applied.
+
+```{r}
+arima_fit <- auto.arima(train$value)
+arima_fit
+```
+
+The fable ARIMA report is below:
+
+```{r}
+best.auto <-
+train %>%
+model(
+  ARIMA(value,approximation=F,stepwise = F)
+) %>%
+report()
+```
+
+The fable ARIMA has lowest BIC value and is a better model compared to auto arima and other methods.
+
+```{r}
+best_mod = train %>%
+  model(ARIMA(value~pdq(2,1,0)+PDQ(2,1,0),approximation = F, stepwise = F))
+
+# Get fitted values
+fitted = best_mod %>%
+  augment() %>%
+  .$.fitted
+
+ggplot() +
+  geom_line(aes(train$date, train$value)) +
+  geom_line(aes(train$date, fitted), color = "blue", alpha = 0.4) +
+  theme_bw()+
+  labs(title = "Comparison of Actual vs Fitted using ARIMA (1,1,1)(0,1,0) Forecast Model ",
+y = "Non-Emergency Requests",
+x = "Year-Month")
+```
+
+the best model from the ARIMA modeling is able to mimic the original line graph exactly.
+
+## [Analysis of model residuals:]{.underline}
+
+```{r}
+best_mod %>%
+  gg_tsresiduals()
+```
+
+There is no significant autocorrelation at any lag and therefore the residual is white noise. For this reason, there is the best ARIMA model. The Box-Ljung test for autocorrelation is performed.
+
+```{r}
+lag_lbstat <- list()
+lag_pvalue <- list()
+
+for (i in 1:13){
+  lag_1 = best_mod %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = i, dof = 1)
+  lag_lbstat <- append(lag_lbstat, lag_1$lb_stat)
+  lag_pvalue <- append(lag_pvalue, lag_1$lb_pvalue)
+}
+df <- cbind(seq(1,13,1),unlist(lag_lbstat, use.names=FALSE),unlist(lag_pvalue, use.names=FALSE))
+colnames(df)<- c("lag","lb_stat","pvalue")
+df <- data.frame(df)
+df
+
+```
+
+Let us proceed to the development of prophet model.
+
+# Section 3 - Meta Prophet Model
+
+## [**Initial prophet model and decompositions:**]{.underline}
+
+```{r warning=FALSE, message=FALSE}
+
+
+library(prophet)
+prophet_data = train %>% 
+    rename(ds = date, # Have to name our date variable "ds"
+    y = value)  # Have to name our time series "y"
+
+
+orig_model = prophet(prophet_data) # Train Model
+
+orig_future = make_future_dataframe(orig_model, periods = 12, freq = "months") # Create future dataframe for predictions
+
+orig_forecast = predict(orig_model,orig_future) # Get forecast
+
+plot(orig_model,orig_forecast)+
+ylab("Non-Emergency Requests")+
+  xlab("Date")+
+  ggtitle("Prophet Model")+
+  theme_bw()
+```
+
+Decomposition of the model is as below.
+
+```{r}
+prophet_plot_components(orig_model,orig_forecast)
+```
+
+## [Hyper parameter tuning for the best prophet model:]{.underline}
+
+### [Changepoints:]{.underline}
+
+The changepoints ,changepoint.range are varied from the initial model.
+
+Since the train data is small the range is increased to 0.9. whereas the changepoints are evaluated for 15,20,25,30,35,40.
+
+```{r warning=FALSE, message=FALSE}
+rmse_list <- list()
+n <- seq(15,40,5)
+for (i in n){
+  model1 = prophet(prophet_data,n.changepoints=i,changepoint.range=0.9)
+  forecast1 = predict(model1)
+  
+  df_cv1 <- cross_validation(model1, initial = 1460, period = 180, horizon = 180, units = 'days')
+  metrics1 = performance_metrics(df_cv1) %>%
+    mutate(model = 'mod1')
+  
+  rmse_value <- mean(metrics1$rmse)
+  rmse_list<- append(rmse_list, rmse_value)
+}
+```
+
+```{r}
+df <- cbind(unlist(rmse_list, use.names=FALSE),seq(15,40,5))
+colnames(df)<- c("rmse_value","number_of_changepoints")
+df <- data.frame(df)
+df %>%
+  ggplot()+
+  geom_line(aes(number_of_changepoints, rmse_value))+
+  labs(
+    title = "RMSE Values for Changepoints evaluation",
+    x = "Horizon",
+    y = "RMSE values"
+  )
+```
+
+From the above graph, It is known that the RMSE value is lowest for changepoints with 15.
+
+### [Linear Vs Logistic growth curve:]{.underline}
+
+```{r warning=FALSE, message=FALSE}
+prophet_data$floor = 0
+prophet_data$cap = 1500
+
+mod1 = prophet(prophet_data,growth = 'linear')
+forecast1 = predict(mod1)
+
+df_cv1 <- cross_validation(mod1, initial = 1460, period = 180, horizon = 180, units = 'days')
+metrics1 = performance_metrics(df_cv1) %>% 
+  mutate(model = 'Linear_growth')
+
+mod2 = prophet(prophet_data,growth = 'logistic')
+forecast2 = predict(mod2)
+
+df_cv2 <- cross_validation(mod2, initial = 1460, period = 180, horizon = 180, units = 'days')
+metrics2 = performance_metrics(df_cv2) %>% 
+  mutate(model = "Logistic_growth")
+
+metrics1 %>% 
+bind_rows(metrics2) %>% 
+ggplot()+
+geom_line(aes(horizon,rmse,color=model))+
+  labs(
+    title = "RMSE Values for Linear Vs Logistic growth curve evaluation",
+    x = "Horizon",
+    y = "RMSE values"
+  )
+```
+
+The rmse for linear is low. And therefore the model should not take into account any saturating minimum/maximum point.
+
+### [Additive vs Multiplicative Seasonality:]{.underline}
+
+```{r warning=FALSE, message=FALSE}
+mod1 = prophet(prophet_data,seasonality.mode='additive')
+forecast1 = predict(mod1)
+
+df_cv1 <- cross_validation(mod1, initial = 1460, period = 180, horizon = 180, units = 'days')
+metrics1 = performance_metrics(df_cv1) %>% 
+  mutate(model = 'Additive_Seasonality')
+
+mod2 = prophet(prophet_data,seasonality.mode='multiplicative')
+forecast2 = predict(mod2)
+
+df_cv2 <- cross_validation(mod2, initial = 2190, period = 180, horizon = 180, units = 'days')
+metrics2 = performance_metrics(df_cv2) %>% 
+  mutate(model = "Multiplicative_Seasonality")
+
+metrics1 %>% 
+bind_rows(metrics2) %>% 
+ggplot()+
+geom_line(aes(horizon,rmse,color=model))+
+  labs(
+    title = "RMSE Values for Seasonality evaluation",
+    x = "Horizon",
+    y = "RMSE values"
+  )
+```
+
+```{r}
+paste0("The rmse for Additive :",mean(metrics1$rmse))
+paste0("The rmse for multiplicative :",mean(metrics2$rmse))
+```
+
+Hence the multiplicative is preferred for modeling seasonality.
+
+### [Holidays:]{.underline}
+
+Since the data is monthly. Holidays is not valid here.
+
+From the above evaluation, the changepoints with 15, changepoint range with 0.9, linear growth, Additive seasonality is taken into consideration for the best Prophet model.
+
+```{r warning=FALSE, message=FALSE}
+best_prophet_model = prophet::prophet(prophet_data, n.changepoints = 15, growth = 'linear', seasonality.mode = 'multiplicative') # Train Model
+```
+
+# Section 4 - Model Comparison and Validation
+
+Since the best models are developed using various methods such as Naive, ARIMA, Prophet model. we have to select the best model among these methods at a certain forecasting horizon. The cross validation is performed below.
+
+## [**Cross-Validation for Naive model, ARIMA model and Prophet model:**]{.underline}
+
+```{r warning=FALSE, message=FALSE}
+cv_data = train %>%
+  stretch_tsibble(.init = 48, .step = 6)
+cv_forecast = cv_data %>%
+  model(snaive = SNAIVE(value),
+  arima = ARIMA(value~pdq(2,1,0)+PDQ(2,1,0))) %>%
+  forecast(h = 6)
+accuracy_forecast<-cv_forecast%>%
+  accuracy(train) %>%
+  data.table::data.table()%>%
+  dplyr::select(.model,RMSE)
+
+best_prophet_model = prophet::prophet(prophet_data, n.changepoints = 15, growth = 'linear', seasonality.mode = 'multiplicative')
+
+df.cv <- cross_validation(best_prophet_model, initial = 4*365, period = 180, horizon = 365/2, units = 'days')
+
+metrics = performance_metrics(df.cv, rolling_window = 0.3) %>% 
+  mutate(model = "Best Prophet Model")
+
+accuracy_tbl <- data.frame(model= c('snaive','arima','prophet'),
+                           RMSE = c(accuracy_forecast$RMSE[2],accuracy_forecast$RMSE[1], round(mean(metrics$rmse),3)))
+
+accuracy_tbl%>%
+  arrange(RMSE)
+```
+
+The seasonal naive is the best model among all the three models provided as it has the lowest RMSE value.
+
+## [Forecasts:]{.underline}
+
+```{r}
+#SNaive Forecast
+train %>% 
+  model(
+  SNAIVE(value)) %>%
+  forecast(h=60) %>%
+  autoplot(test%>%
+             bind_rows(train))+
+  theme_bw()+
+  labs(title = "Naive Forecast with Seasonality",
+       y = "Non-Emergency Requests",
+       x = "Year-Month") 
+```
+
+## [Performance metrics:]{.underline}
+
+Seasonal Naive model on the test data gives the following metrics.
+
+```{r}
+train %>% 
+  model(
+  SNAIVE(value)) %>%
+  forecast(h=60) %>%
+  accuracy(test)%>%
+  data.table::data.table()%>%
+  dplyr::select(.model,RMSE, MAE, MAPE)
+```
